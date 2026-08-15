@@ -25,7 +25,11 @@ from flashinfer.cute_dsl.utils import (
     make_ptr,
 )
 from flashinfer.jit.cute_dsl_core import build_and_load_cute_dsl_kernel
-from .moe_activation import SWIGLUOAI_UNINTERLEAVE, is_gated_activation
+from .moe_activation import (
+    SWIGLUOAI_UNINTERLEAVE,
+    is_gated_activation,
+    normalize_swiglu_limit_for_activation,
+)
 from .moe_direct_micro_kernel import (
     MoEDirectMicroKernel,
     build_direct_micro_kernel,
@@ -1369,11 +1373,13 @@ def _get_direct_micro_kernel(
     """
     if activation != SWIGLUOAI_UNINTERLEAVE:
         # The kernel constructor only accepts configurable swiglu parameters
-        # for swigluoai; other activations use its normalized defaults
-        # (accept-and-ignore, matching the MMA kernels).
+        # for swigluoai. SiLU additionally accepts the gate/up clamp limit;
+        # other parameters use normalized defaults (accept-and-ignore,
+        # matching the MMA kernels).
         swiglu_alpha = None
         swiglu_beta = None
-        swiglu_limit = None
+        if activation != "silu":
+            swiglu_limit = None
     launch_key = (
         weight_E,
         m,
@@ -3194,6 +3200,8 @@ def launch_sm120_moe(
     quant_mode = _normalize_quant_mode(quant_mode, activation_precision)
     source_format = _normalize_source_format_for_quant_mode(source_format, quant_mode)
     activation_precision = _activation_precision_from_quant_mode(quant_mode)
+    if swiglu_limit is not None and is_gated_activation(activation):
+        swiglu_limit = normalize_swiglu_limit_for_activation(activation, swiglu_limit)
 
     num_tokens = topk_ids.size(0)
     k = a.size(1)  # hidden_size

@@ -135,11 +135,16 @@ def b12x_fused_moe(
         Activation function — ``"silu"`` (gated SwiGLU), ``"gelu_tanh"`` (gated
         tanh-approx GeGLU), ``"swigluoai_uninterleave"`` (gated SwiGLU-OAI)
         or ``"relu2"`. Defaults to ``"silu"``.
-    swiglu_alpha, swiglu_beta, swiglu_limit : float
+    swiglu_alpha, swiglu_beta : float
         SwiGLU-OAI parameters used only when
-        ``activation="swigluoai_uninterleave"``: ``gate*sigmoid(alpha*gate)*
-        (up+beta)`` with optional clamp to ``swiglu_limit`` (``None`` disables).
-        Defaults to 1.702 / 1.0 / None as standard parameters for approximating GELU.
+        ``activation="swigluoai_uninterleave"``:
+        ``gate*sigmoid(alpha*gate)*(up+beta)``. Defaults to 1.702 / 1.0.
+    swiglu_limit : Optional[float]
+        Optional gate/up clamp limit. For ``activation="silu"``, computes
+        ``silu(min(gate, limit)) * clamp(up, -limit, limit)``; ``None`` keeps
+        the standard unclamped SiLU behavior. For
+        ``activation="swigluoai_uninterleave"``, controls its existing clamp
+        semantics. Defaults to ``None``.
     activation_precision : str
         Backward-compatible alias for ``quant_mode``.  ``"fp4"`` selects
         ``quant_mode="nvfp4"``; ``"bf16"`` selects ``quant_mode="w4a16"``.
@@ -249,7 +254,14 @@ class B12xMoEWrapper:
             supported. Default: torch.bfloat16.
         device: Device for buffer allocation. Default: "cuda".
         activation: Activation — "silu", "gelu_tanh", "swigluoai_uninterleave", or
-            "relu2". Default: "silu". swiglu_alpha/beta/limit apply to swigluoai.
+            "relu2". Default: "silu".
+        swiglu_alpha: SwiGLU-OAI sigmoid multiplier, used only for
+            "swigluoai_uninterleave". Default: 1.702.
+        swiglu_beta: SwiGLU-OAI up-term bias, used only for
+            "swigluoai_uninterleave". Default: 1.0.
+        swiglu_limit: Optional gate/up clamp. For "silu", applies
+            DeepSeek-style clamping; for "swigluoai_uninterleave", keeps the
+            existing SwiGLU-OAI clamp semantics. Default: None.
         activation_precision: Backward-compatible alias for quant_mode.
             "fp4" selects quant_mode="nvfp4"; "bf16" selects quant_mode="w4a16".
         quant_mode: Quantization mode, "nvfp4"/"w4a4", "mxfp4", or "w4a16".
@@ -315,10 +327,15 @@ class B12xMoEWrapper:
             Activation function — ``"silu"`` (gated SwiGLU), ``"gelu_tanh"``
             (gated GeGLU, tanh-approx GELU), ``"swigluoai_uninterleave"`` (gated
             SwiGLU-OAI) or ``"relu2"`` (non-gated). Defaults to ``"silu"``.
-        swiglu_alpha, swiglu_beta, swiglu_limit : float
-            SwiGLU-OAI parameters (only for ``"swigluoai_uninterleave"``):
-            ``gate*sigmoid(alpha*gate)*(up+beta)`` with optional clamp to
-            ``swiglu_limit`` (``None`` disables). Defaults 1.702 / 1.0 / None.
+        swiglu_alpha, swiglu_beta : float
+            SwiGLU-OAI parameters used only for
+            ``activation="swigluoai_uninterleave"``:
+            ``gate*sigmoid(alpha*gate)*(up+beta)``. Defaults to 1.702 / 1.0.
+        swiglu_limit : Optional[float]
+            Optional gate/up clamp limit. For ``activation="silu"``, computes
+            ``silu(min(gate, limit)) * clamp(up, -limit, limit)``; ``None``
+            keeps standard SiLU. For ``activation="swigluoai_uninterleave"``,
+            controls its existing clamp semantics. Defaults to ``None``.
         activation_precision : str
             Backward-compatible alias for ``quant_mode``.  ``"fp4"`` selects
             ``quant_mode="nvfp4"``; ``"bf16"`` selects ``quant_mode="w4a16"``.

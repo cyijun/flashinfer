@@ -65,12 +65,12 @@ def _dynamic_gated_activation_f32(
 ):
     """Apply a compile-time-selected gated scalar formula.
 
-    Keep the tuned explicit-inline-PTX reciprocal emission path for SiLU.
+    Keep the tuned explicit-inline-PTX reciprocal emission path for unclamped SiLU.
     ``cute.arch.rcp_approx`` has the same FTZ math semantics in the current
-    CUTLASS DSL, but reaches the compiler through an NVVM intrinsic.  Other
-    gated formulas remain centralized in ``gated_activation_f32``.
+    CUTLASS DSL, but reaches the compiler through an NVVM intrinsic. Clamped
+    SiLU and other gated formulas remain centralized in ``gated_activation_f32``.
     """
-    if cutlass.const_expr(activation == "silu"):
+    if cutlass.const_expr(activation == "silu" and limit is None):
         sigmoid = rcp_approx_ftz(
             cutlass.Float32(1.0)
             + cute.math.exp(cutlass.Float32(0.0) - g, fastmath=fast_math)

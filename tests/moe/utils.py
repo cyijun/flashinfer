@@ -470,6 +470,9 @@ def compute_reference_moe_fp4(
                 elif activation == "gelu_tanh":
                     act_out = F.gelu(gate, approximate="tanh") * linear
                 elif activation == "silu":
+                    if swiglu_limit is not None:
+                        gate = gate.clamp(max=swiglu_limit)
+                        linear = linear.clamp(min=-swiglu_limit, max=swiglu_limit)
                     act_out = silu(gate) * linear
                 else:
                     if swiglu_limit is not None:

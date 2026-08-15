@@ -106,16 +106,20 @@ def gated_activation_f32(
 ):
     """Return ``act(gate) * up_term`` (Float32) for a gated MoE activation.
 
-    - silu: ``g*sigmoid(g)*u``
+    - silu: ``g*sigmoid(g)*u``, with DeepSeek-style gate/up clamp when
+      ``limit`` is set
     - gelu_tanh: ``g*sigmoid(2z)*u`` (tanh-approx GELU, sigmoid(2z) == 0.5*(1+tanh(z)),
       z = 0.7978845608*(g + 0.044715*g^3))
     - swigluoai: ``g*sigmoid(alpha*g)*(u+beta)``, clamped when ``limit`` is set
     """
+    if cutlass.const_expr(
+        limit is not None and activation in {"silu", "swigluoai_uninterleave"}
+    ):
+        lim = Float32(limit)
+        g = fmin_f32(g, lim)
+        u = fmax_f32(fmin_f32(u, lim), Float32(-limit))
+
     if cutlass.const_expr(activation == "swigluoai_uninterleave"):
-        if cutlass.const_expr(limit is not None):
-            lim = Float32(limit)
-            g = fmin_f32(g, lim)
-            u = fmax_f32(fmin_f32(u, lim), Float32(-limit))
         sig_arg = Float32(alpha) * g
         up_term = u + Float32(beta)
     elif cutlass.const_expr(activation == "gelu_tanh"):

@@ -158,6 +158,38 @@ def test_gated_dynamic_constructor_rejects_unsupported_geometry():
 
 @cute_dsl_available
 @pytest.mark.parametrize(
+    "swiglu_limit",
+    [0.0, -1.0, float("nan"), float("inf"), float("-inf")],
+)
+def test_silu_rejects_invalid_swiglu_limit(swiglu_limit: float):
+    from flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch import (
+        launch_sm120_moe,
+    )
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        # Limit validation happens before any tensor or device access, so this
+        # directly checks the unified functional/wrapper dispatch contract.
+        launch_sm120_moe(
+            a=None,
+            topk_ids=None,
+            topk_weights=None,
+            w1_weight=None,
+            w1_weight_sf=None,
+            w1_alpha=None,
+            w2_weight=None,
+            w2_weight_sf=None,
+            w2_alpha=None,
+            num_experts=1,
+            top_k=1,
+            num_local_experts=1,
+            scatter_output=None,
+            activation="silu",
+            swiglu_limit=swiglu_limit,
+        )
+
+
+@cute_dsl_available
+@pytest.mark.parametrize(
     "overrides,expected_gated",
     [
         ({}, True),
@@ -1163,10 +1195,18 @@ class TestB12xFunctional:
         )
 
     @pytest.mark.parametrize(
-        "activation", ["silu", "gelu_tanh", "swigluoai_uninterleave"]
+        "activation,swiglu_limit",
+        [
+            pytest.param("silu", None, id="silu-unclamped"),
+            pytest.param("silu", 10.0, id="silu-clamped"),
+            pytest.param("gelu_tanh", None, id="gelu-tanh"),
+            pytest.param("swigluoai_uninterleave", 7.0, id="swigluoai-clamped"),
+        ],
     )
     @pytest.mark.parametrize("num_tokens", [8, 128, 515])
-    def test_activation_accuracy(self, activation: str, num_tokens: int):
+    def test_activation_accuracy(
+        self, activation: str, swiglu_limit: float | None, num_tokens: int
+    ):
         """Accuracy of each gated activation: SwiGLU, GeGLU and SwiGLU-OAI.
 
         Num tokens chosen to trigger the micro, static and dynamic backends to ensure
@@ -1176,9 +1216,6 @@ class TestB12xFunctional:
 
         hidden_size, intermediate_size = 1536, 768
         num_experts, top_k = 8, 2
-        swiglu_limit = (
-            7.0 if activation == "swigluoai_uninterleave" else None
-        )  # Minimax-M3 clamp limit
         tensors = create_moe_tensors(
             num_tokens=num_tokens,
             hidden_size=hidden_size,
@@ -1222,6 +1259,127 @@ class TestB12xFunctional:
         )
         passed, percent_within, atol = check_accuracy(result, ref_output)
         assert passed, f"Only {percent_within * 100:.2f}% within tol (atol={atol:.4f})"
+
+    @pytest.mark.parametrize(
+        "backend,num_tokens,intermediate_size,optimized_dynamic",
+        [
+            pytest.param("direct_micro", 2, 512, False, id="direct-micro"),
+            pytest.param("micro", 8, 512, False, id="micro"),
+            pytest.param("static", 64, 512, False, id="static"),
+            pytest.param("dynamic", 97, 512, True, id="dynamic-optimized-gated"),
+            pytest.param("dynamic", 97, 640, False, id="dynamic-generic"),
+        ],
+    )
+    def test_clamped_silu_forced_backend_accuracy(
+        self,
+        monkeypatch,
+        backend: str,
+        num_tokens: int,
+        intermediate_size: int,
+        optimized_dynamic: bool,
+    ):
+        """Every NVFP4 backend must apply a non-vacuous SiLU gate/up clamp."""
+        from flashinfer import b12x_fused_moe
+        from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import moe_dispatch
+
+        monkeypatch.setattr(moe_dispatch, "_FORCED_BACKEND", backend)
+
+        hidden_size = 256
+        num_experts, top_k = 1, 1
+        swiglu_limit = 10.0
+        tensors = create_moe_tensors(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            top_k=top_k,
+            seed=20260815,
+        )
+        # Scale the already-quantized FC1 result, leaving input quantization at
+        # its normal scale. This reliably pushes both gate and up beyond 10.
+        tensors["w1_alpha"].fill_(32.0)
+        input_global_scale = torch.ones_like(tensors["w1_alpha"])
+
+        if backend == "dynamic":
+            from flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dynamic_kernel import (
+                _can_use_gated_optimized_kernel,
+            )
+
+            tile_m = moe_dispatch._select_dynamic_tile_m(
+                num_tokens * top_k, num_experts, "silu"
+            )
+            assert (
+                _can_use_gated_optimized_kernel(
+                    activation="silu",
+                    sf_vec_size=16,
+                    mma_tiler_mn=(tile_m, 128),
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                    num_topk=top_k,
+                )
+                is optimized_dynamic
+            )
+
+        fc1 = (
+            tensors["w1_alpha"][0]
+            * tensors["x_bf16"][:1].float()
+            @ tensors["w1_weight_bf16"][0].float().T
+        )
+        linear = fc1[:, :intermediate_size]
+        gate = fc1[:, intermediate_size:]
+        assert gate.max().item() > swiglu_limit
+        assert linear.abs().max().item() > swiglu_limit
+
+        result = b12x_fused_moe(
+            x=tensors["x_bf16"],
+            w1_weight=tensors["w1_weight"],
+            w1_weight_sf=tensors["w1_weight_sf"],
+            w1_alpha=tensors["w1_alpha"],
+            input_global_scale=input_global_scale,
+            fc2_input_scale=tensors["fc2_input_scale"],
+            w2_weight=tensors["w2_weight"],
+            w2_weight_sf=tensors["w2_weight_sf"],
+            w2_alpha=tensors["w2_alpha"],
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_experts=num_experts,
+            top_k=top_k,
+            activation="silu",
+            swiglu_limit=swiglu_limit,
+        )
+
+        reference_kwargs = dict(
+            hidden_states=tensors["x_bf16"].float(),
+            gemm1_weights=tensors["w1_weight_bf16"].float(),
+            gemm2_weights=tensors["w2_weight_bf16"].float(),
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            fc2_input_scale=tensors["fc2_input_scale"],
+            activation="silu",
+            gemm1_alpha=tensors["w1_alpha"],
+        )
+        ref_output = compute_reference_moe_fp4(
+            **reference_kwargs, swiglu_limit=swiglu_limit
+        )
+        unclamped_ref = compute_reference_moe_fp4(**reference_kwargs, swiglu_limit=None)
+
+        passed, percent_within, atol = check_accuracy(result, ref_output)
+        assert passed, (
+            f"{backend}: only {percent_within * 100:.2f}% within tol (atol={atol:.4f})"
+        )
+        clamped_error = torch.linalg.vector_norm(result.float() - ref_output)
+        unclamped_error = torch.linalg.vector_norm(result.float() - unclamped_ref)
+        assert clamped_error < unclamped_error, (
+            f"{backend} is not observably closer to the clamped reference: "
+            f"clamped_error={clamped_error.item():.4f}, "
+            f"unclamped_error={unclamped_error.item():.4f}"
+        )
 
     @pytest.mark.parametrize(
         "activation", ["silu", "gelu_tanh", "swigluoai_uninterleave"]
