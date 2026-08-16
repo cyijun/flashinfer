@@ -513,6 +513,7 @@ class B12xMoEWrapper:
         w2_alpha: torch.Tensor,
         fc2_input_scale: Optional[torch.Tensor] = None,
         input_global_scale: Optional[torch.Tensor] = None,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""Run the b12x fused-MoE forward pass.
 
@@ -544,6 +545,9 @@ class B12xMoEWrapper:
             Global scale for FC1 input quantization, scalar or
             ``[num_experts]``.  Defaults to ``w1_alpha``; see
             :func:`b12x_fused_moe`.  Ignored for ``"w4a16"``.
+        output : Optional[torch.Tensor]
+            Pre-allocated output buffer of shape
+            ``[num_tokens, hidden_size]`` and dtype ``bfloat16``.
 
         Returns
         -------
@@ -557,15 +561,28 @@ class B12xMoEWrapper:
                 f"num_tokens ({num_tokens}) exceeds max_num_tokens "
                 f"({self.max_num_tokens})"
             )
+        if not self.use_cuda_graph and _is_cuda_graph_capturing():
+            raise RuntimeError(
+                "B12xMoEWrapper must be constructed with use_cuda_graph=True "
+                "to run during CUDA graph capture."
+            )
 
-        if self.use_cuda_graph:
+        if output is not None:
+            if output.dtype != torch.bfloat16:
+                raise ValueError(
+                    "B12xMoEWrapper only supports bf16 output buffers, "
+                    f"got output.dtype={output.dtype}."
+                )
+            if output.shape != (num_tokens, self.hidden_size):
+                raise ValueError(
+                    "B12xMoEWrapper output buffer has shape "
+                    f"{tuple(output.shape)}, expected "
+                    f"({num_tokens}, {self.hidden_size})."
+                )
+            moe_output = output
+        elif self.use_cuda_graph:
             moe_output = self._moe_output[:num_tokens]
         else:
-            if _is_cuda_graph_capturing():
-                raise RuntimeError(
-                    "B12xMoEWrapper must be constructed with use_cuda_graph=True "
-                    "to run during CUDA graph capture."
-                )
             moe_output = torch.empty(
                 (num_tokens, self.hidden_size),
                 dtype=self.output_dtype,

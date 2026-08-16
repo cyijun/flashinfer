@@ -1943,8 +1943,10 @@ class TestB12xWrapper:
             use_cuda_graph=False,
         )
 
+        output = torch.empty_like(tensors["x_bf16"])
         result = moe.run(
             x=tensors["x_bf16"],
+            output=output,
             w1_weight=tensors["w1_weight"],
             w1_weight_sf=tensors["w1_weight_sf"],
             w1_alpha=tensors["w1_alpha"],
@@ -1956,6 +1958,7 @@ class TestB12xWrapper:
             token_final_scales=tensors["token_final_scales"],
         )
 
+        assert result is output
         assert result.shape == (num_tokens, hidden_size)
         assert not torch.isnan(result).any()
         assert not torch.isinf(result).any()
