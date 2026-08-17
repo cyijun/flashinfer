@@ -28,6 +28,8 @@ from flashinfer.jit.cute_dsl_core import build_and_load_cute_dsl_kernel
 from .moe_activation import (
     SWIGLUOAI_UNINTERLEAVE,
     is_gated_activation,
+    normalize_swiglu_alpha_for_activation,
+    normalize_swiglu_beta_for_activation,
     normalize_swiglu_limit_for_activation,
 )
 from .moe_direct_micro_kernel import (
@@ -2658,6 +2660,7 @@ def _get_w4a16_packed_weights(
     activation: str,
     params_dtype: torch.dtype,
     source_format: str = "modelopt",
+    reuse_input_storage: bool = False,
 ) -> W4A16PackedWeights:
     key = (
         activation,
@@ -2694,6 +2697,7 @@ def _get_w4a16_packed_weights(
         activation=activation,
         params_dtype=params_dtype,
         source_format=source_format,
+        reuse_input_storage=reuse_input_storage,
     )
     _W4A16_WEIGHT_CACHE[key] = prepared
     _register_cache_eviction(
@@ -2758,10 +2762,15 @@ def _launch_sm120_w4a16_moe(
     scatter_output: torch.Tensor,
     fast_math: bool = True,
     activation: str = "silu",
+    swiglu_alpha: float = 1.702,
+    swiglu_beta: float = 1.0,
+    swiglu_limit: float | None = None,
     source_format: str = "modelopt",
     _workspace=None,
     _prepared_weights=None,
 ) -> torch.Tensor:
+    swiglu_alpha = normalize_swiglu_alpha_for_activation(activation, swiglu_alpha)
+    swiglu_beta = normalize_swiglu_beta_for_activation(activation, swiglu_beta)
     prepared = (
         _prepared_weights
         if isinstance(_prepared_weights, W4A16PackedWeights)
@@ -2830,6 +2839,9 @@ def _launch_sm120_w4a16_moe(
         expert_offsets=workspace.expert_offsets,
         expert_map=workspace.expert_map,
         fast_math=fast_math,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
+        swiglu_limit=swiglu_limit,
     )
 
 
@@ -3254,6 +3266,9 @@ def launch_sm120_moe(
             scatter_output=scatter_output,
             fast_math=fast_math,
             activation=activation,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_beta=swiglu_beta,
+            swiglu_limit=swiglu_limit,
             source_format=source_format,
             _workspace=_workspace,
             _prepared_weights=_prepared_weights,

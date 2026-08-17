@@ -2497,6 +2497,69 @@ class TestMicroKernel:
             f"(atol={atol:.4f}, tokens={num_tokens})"
         )
 
+    def test_w4a16_clamped_silu_accuracy(self):
+        """The W4A16 dispatcher must pass the SiLU clamp to its kernel."""
+        from flashinfer import b12x_fused_moe
+
+        num_tokens, hidden_size, intermediate_size = 2, 512, 256
+        num_experts, top_k = 8, 2
+        limit = 10.0
+        tensors = create_moe_tensors(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            top_k=top_k,
+            seed=20260817,
+        )
+        tensors["x_bf16"].mul_(32.0)
+
+        result = b12x_fused_moe(
+            x=tensors["x_bf16"],
+            w1_weight=tensors["w1_weight"],
+            w1_weight_sf=tensors["w1_weight_sf"],
+            w1_alpha=tensors["w1_alpha"],
+            fc2_input_scale=tensors["fc2_input_scale"],
+            w2_weight=tensors["w2_weight"],
+            w2_weight_sf=tensors["w2_weight_sf"],
+            w2_alpha=tensors["w2_alpha"],
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_experts=num_experts,
+            top_k=top_k,
+            activation="silu",
+            swiglu_limit=limit,
+            quant_mode="w4a16",
+        )
+
+        reference_args = dict(
+            hidden_states=tensors["x_bf16"].float().cuda(),
+            gemm1_weights=tensors["w1_weight_bf16"].float().cuda(),
+            gemm2_weights=tensors["w2_weight_bf16"].float().cuda(),
+            token_selected_experts=tensors["token_selected_experts"],
+            token_final_scales=tensors["token_final_scales"],
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            fc2_input_scale=None,
+            activation="silu",
+        )
+        clamped_reference = compute_reference_moe_fp4(
+            **reference_args, swiglu_limit=limit
+        )
+        unclamped_reference = compute_reference_moe_fp4(
+            **reference_args, swiglu_limit=None
+        )
+
+        clamp_effect = (clamped_reference - unclamped_reference).abs().mean()
+        clamped_error = (result.float() - clamped_reference).abs().mean()
+        unclamped_error = (result.float() - unclamped_reference).abs().mean()
+        assert clamp_effect > 0.1
+        assert clamped_error < unclamped_error * 0.75
+
     def test_w4a16_direct_micro_wrapper_accuracy(self):
         """Accuracy test for W4A16 small-batch route-packing via B12xMoEWrapper."""
         from flashinfer import B12xMoEWrapper
