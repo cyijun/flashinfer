@@ -381,7 +381,22 @@ def _candidate_tile_fits(
         or int(tile_k) % scale_group_size != 0
     ):
         return False
-    if int(tile_n) < 64 or int(tile_k) < 64 or int(cta_threads) < 128:
+    # TC-decode may deliberately use a 512x32 FC2 tile for e8m0_k32.  It has
+    # one complete scale group per K tile and keeps the 256-thread geometry,
+    # so allow the same narrow-K shape when a selected launch is re-pinned
+    # across the custom-op boundary.  Other candidates retain the generic
+    # tile_k >= 64 floor.
+    is_e8m0_tc_decode_fc2 = (
+        _normalize_scale_format(scale_format) == "e8m0_k32"
+        and int(tile_n) == 512
+        and int(tile_k) == 32
+        and int(cta_threads) == 256
+    )
+    if (
+        int(tile_n) < 64
+        or (int(tile_k) < 64 and not is_e8m0_tc_decode_fc2)
+        or int(cta_threads) < 128
+    ):
         return False
     smem_bytes = _shared_memory_footprint(
         cta_m_blocks=cta_m_blocks,
