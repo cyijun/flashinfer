@@ -5463,6 +5463,7 @@ def compile_w4a16_fused_moe(
     )
     if (
         bool(tc_decode_fused_sum)
+        and scale_format == "e8m0_k32"
         and int(hidden_size) % 512 == 0
         and fc2_tile_n == 256
         and fc1_cta_threads == 256

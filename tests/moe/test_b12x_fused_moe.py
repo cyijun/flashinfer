@@ -107,6 +107,42 @@ def _clear_static_cutover_env(monkeypatch):
 
 
 @cute_dsl_available
+@sm120_required
+def test_w4a16_e4m3_tc_decode_does_not_select_e8m0_fc2_tile(monkeypatch):
+    """Packed ModelOpt scales must not select the K/32-only wide FC2 tile."""
+    from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import moe_w4a16_kernel
+
+    props = torch.cuda.get_device_properties(0)
+    moe_w4a16_kernel._FUSED_CACHE.clear()
+    monkeypatch.setattr(
+        moe_w4a16_kernel,
+        "cached_compile",
+        lambda *args, **kwargs: object(),
+    )
+    compiled = moe_w4a16_kernel.compile_w4a16_fused_moe(
+        size_m=2,
+        hidden_size=4096,
+        intermediate_size=1024,
+        num_experts=256,
+        top_k=6,
+        activation="silu",
+        apply_router_weight_on_input=False,
+        zero_fc2_output=False,
+        moe_block_size=8,
+        max_m_blocks=2,
+        sms=props.multi_processor_count,
+        max_shared_mem=props.shared_memory_per_block_optin,
+        swiglu_limit=10.0,
+        weight_layout="packed",
+        scale_format="e4m3_k16",
+        direct_topk_routes=True,
+        tc_decode_fused_sum=True,
+    )
+
+    assert (compiled.fc2_tile_k, compiled.fc2_tile_n) != (32, 512)
+
+
+@cute_dsl_available
 @pytest.mark.parametrize(
     "overrides,expected",
     [
